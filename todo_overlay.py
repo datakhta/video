@@ -3,6 +3,7 @@
 
 Usage: python3 todo_overlay.py INPUT.mov OUTPUT.mp4
 """
+import os
 import subprocess
 import sys
 
@@ -12,7 +13,6 @@ W = 1080            # output video width (portrait)
 SS = 2              # supersampling factor for smooth edges
 FPS = 30
 
-TITLE = "TODO"
 ITEMS = [
     # text, appear time (s), check time (s)
     ("Дождаться мужчину с командировки", 0.9, 3.6),
@@ -20,20 +20,20 @@ ITEMS = [
     ("Наслаждаться горячими завтраками каждый день, пока сама работаешь", 10.0, 15.5),
 ]
 
-FONT_BOLD = "/usr/share/fonts/opentype/inter/Inter-Bold.otf"
-FONT_TEXT = "/usr/share/fonts/opentype/inter/Inter-SemiBold.otf"
+FONT_TEXT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "Comfortaa.ttf")
+FONT_WEIGHT = b"Bold"
 
-INK = (38, 32, 30)
-ACCENT = (235, 120, 60)
-CARD = (255, 252, 247)
+INK = (74, 22, 34)        # deep wine
+ACCENT = (138, 30, 54)    # burgundy, matches the t-shirt
+CARD = (255, 246, 246)    # soft blush
 
 # layout (in 1x pixels)
 CARD_X, CARD_Y, CARD_W = 54, 110, W - 108
 PAD = 44
 BOX = 50
 GAP = 26                 # between checkbox and text
-TITLE_SIZE, TEXT_SIZE = 62, 42
-LINE_H = 54
+TEXT_SIZE = 36
+LINE_H = 52
 ITEM_GAP = 30
 
 
@@ -63,13 +63,13 @@ def s(v):
     return int(round(v * SS))
 
 
-title_font = ImageFont.truetype(FONT_BOLD, s(TITLE_SIZE))
 text_font = ImageFont.truetype(FONT_TEXT, s(TEXT_SIZE))
+text_font.set_variation_by_name(FONT_WEIGHT)
 text_w = CARD_W - 2 * PAD - BOX - GAP
 
 # precompute layout
 layout = []
-y = CARD_Y + PAD + TITLE_SIZE + 34
+y = CARD_Y + PAD
 for text, t_in, t_chk in ITEMS:
     lines = wrap(text, text_font, s(text_w))
     layout.append((lines, y, t_in, t_chk))
@@ -96,12 +96,6 @@ def render(t):
         (s(CARD_X), s(CARD_Y + dy), s(CARD_X + CARD_W), s(CARD_Y + CARD_H + dy)),
         s(38), fill=CARD + (int(232 * a_card),))
 
-    # title + accent underline
-    tx, ty = CARD_X + PAD, CARD_Y + PAD + dy
-    d.text((s(tx), s(ty)), TITLE, font=title_font, fill=INK + (int(255 * a_card),), anchor="lt")
-    ul = prog(t, 0.5, 0.6)
-    d.rounded_rectangle((s(tx), s(ty + TITLE_SIZE + 8), s(tx + 150 * ul + 1), s(ty + TITLE_SIZE + 16)),
-                        s(4), fill=ACCENT + (int(255 * a_card),))
 
     for lines, iy, t_in, t_chk in layout:
         a = prog(t, t_in, 0.45)
@@ -112,7 +106,6 @@ def render(t):
         bx, by = CARD_X + PAD + ox, iy + (LINE_H - BOX) / 2
         fill = prog(t, t_chk, 0.22)
         check = prog(t, t_chk + 0.12, 0.3)
-        strike = prog(t, t_chk + 0.3, 0.6)
         al = int(255 * a)
 
         # checkbox (with a little pop when checked)
@@ -142,20 +135,11 @@ def render(t):
                 r = 3
                 d.ellipse((s(x - r), s(y - r), s(x + r), s(y + r)), fill=(255, 255, 255, al))
 
-        # text (dims once done)
-        txa = int(al * (1 - 0.45 * strike))
+        # text
         lx = bx + BOX + GAP
-        widths = [text_font.getlength(ln) / SS for ln in lines]
-        total = sum(widths)
-        done = total * strike
         for k, ln in enumerate(lines):
             ly = iy + k * LINE_H + LINE_H / 2
-            d.text((s(lx), s(ly)), ln, font=text_font, fill=INK + (txa,), anchor="lm")
-            seg = min(max(done, 0), widths[k])
-            done -= widths[k]
-            if seg > 0:
-                d.rounded_rectangle((s(lx - 4), s(ly - 2), s(lx + seg + 4), s(ly + 3)),
-                                    s(2), fill=ACCENT + (al,))
+            d.text((s(lx), s(ly)), ln, font=text_font, fill=INK + (al,), anchor="lm")
 
     frame = big.resize((W, H), Image.LANCZOS)
     sh = shadow.copy()
@@ -190,5 +174,5 @@ if __name__ == "__main__":
     if len(sys.argv) == 3:
         main(sys.argv[1], sys.argv[2])
     else:  # preview stills
-        for t in (0.4, 2.0, 4.2, 9.5, 16.5):
+        for t in (4.2, 9.5, 16.5):
             render(t).save(f"preview_{t:04.1f}.png")
