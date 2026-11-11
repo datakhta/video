@@ -4,15 +4,20 @@
 Each item gets ticked the moment that ingredient lands on the burger; at the
 end either a round chomper eats the burger (--finale chomper, default) or the
 FISH&MORE pack pops in with a "Попробуйте!" call to action (--finale pack).
-Usage: python3 burger_checklist.py [--finale chomper|pack] INPUT.mov OUTPUT.mp4
+Usage: python3 burger_checklist.py [--finale chomper|pack] [--theme red|blue] INPUT.mov OUTPUT.mp4
 """
 import math
 import os
 import random
 import subprocess
 import sys
+from multiprocessing import Pool
+
+import numpy as np
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
+
+from recolor import Recolor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 W, H = 1080, 1920
@@ -39,8 +44,20 @@ CARD_OUT = (16.4, 0.5)     # burger drives up into the card area after ~17 s
 FONT = os.path.join(HERE, "fonts", "Nunito.ttf")
 
 WHITE = (255, 255, 255)
-WINE = (110, 8, 30)        # tick colour, picked from the red wall
-MUSTARD = (255, 204, 64)   # title + chomper, like the burger sauce
+WINE = (110, 8, 30)        # picked from the red wall
+MUSTARD = (255, 204, 64)   # like the burger sauce
+SKY = (141, 198, 232)      # FISH&MORE light blue
+NAVY = (14, 58, 93)        # FISH&MORE dark blue
+DEEP_BLUE = (28, 88, 175)  # new floor colour
+
+# colour themes: "red" keeps the original set, "blue" repaints it in brand colours
+THEMES = {
+    "red": dict(backdrop=None, tick=WINE, title=MUSTARD, glass=(WHITE, 22), ink_shadow=(40, 0, 10),
+                cta=MUSTARD, cta_shadow=WINE),
+    "blue": dict(backdrop=(SKY, DEEP_BLUE), tick=NAVY, title=WHITE, glass=(NAVY, 70), ink_shadow=(4, 24, 48),
+                 cta=WHITE, cta_shadow=NAVY),
+}
+THEME = THEMES["red"]
 BLUR = 22                  # frosted-glass blur radius
 
 # layout (1x px)
@@ -124,13 +141,13 @@ def draw_check(d, cx, cy, k, al):
     else:
         f = (L - l1) / l2
         path += [pts[1], (pts[1][0] + (pts[2][0] - pts[1][0]) * f, pts[1][1] + (pts[2][1] - pts[1][1]) * f)]
-    d.line([(s(x), s(y)) for x, y in path], fill=WINE + (al,), width=s(5), joint="curve")
+    d.line([(s(x), s(y)) for x, y in path], fill=THEME["tick"] + (al,), width=s(5), joint="curve")
     for x, y in (path[0], path[-1]):
-        d.ellipse((s(x - 2.5), s(y - 2.5), s(x + 2.5), s(y + 2.5)), fill=WINE + (al,))
+        d.ellipse((s(x - 2.5), s(y - 2.5), s(x + 2.5), s(y + 2.5)), fill=THEME["tick"] + (al,))
 
 
 def card_alpha(t):
-    # linear, so it matches ffmpeg's fade on the blurred glass layer
+    # linear fade in/out
     a_in = min(max((t - CARD_IN[0]) / CARD_IN[1], 0), 1)
     a_out = min(max((t - CARD_OUT[0]) / CARD_OUT[1], 0), 1)
     return a_in * (1 - a_out)
@@ -148,16 +165,17 @@ def render_card(t, out):
         return
     al = int(255 * a)
 
-    # glass: just a faint white tint, no rim (the blur itself comes from ffmpeg)
+    # glass: just a faint tint, no rim (the blur is done in process_frame)
     glass = Image.new("RGBA", (W, TOP_H), (0, 0, 0, 0))
-    tint = Image.new("RGBA", (CARD_W, CARD_H), WHITE + (0,))
-    tint.putalpha(GLASS_MASK.point(lambda v: int(v * 22 / 255 * a)))
+    tint_rgb, tint_a = THEME["glass"]
+    tint = Image.new("RGBA", (CARD_W, CARD_H), tint_rgb + (0,))
+    tint.putalpha(GLASS_MASK.point(lambda v: int(v * tint_a / 255 * a)))
     glass.alpha_composite(tint, (CARD_X, CARD_Y))
 
     # content on its own layer so it gets a soft shadow for legibility
     ink = Image.new("RGBA", (s(W), s(TOP_H)), (0, 0, 0, 0))
     d = ImageDraw.Draw(ink)
-    d.text((s(CARD_X + PAD), s(CARD_Y + PAD)), TITLE, font=title_font, fill=MUSTARD + (al,), anchor="lt")
+    d.text((s(CARD_X + PAD), s(CARD_Y + PAD)), TITLE, font=title_font, fill=THEME["title"] + (al,), anchor="lt")
     for (txt, t_chk), lines, (x, y) in zip(ITEMS, wrapped, layout):
         fill = prog(t, t_chk, 0.18)
         check = prog(t, t_chk + 0.08, 0.25)
@@ -175,7 +193,7 @@ def render_card(t, out):
                    fill=WHITE + (al,), anchor="lm")
 
     ink = ink.resize((W, TOP_H), Image.LANCZOS)
-    sh = Image.new("RGBA", ink.size, (40, 0, 10, 0))
+    sh = Image.new("RGBA", ink.size, THEME["ink_shadow"] + (0,))
     sh.putalpha(ink.getchannel("A").point(lambda v: v * 0.6).filter(ImageFilter.GaussianBlur(4)))
     out.alpha_composite(glass, (0, 0))
     out.alpha_composite(sh, (0, 2))
@@ -422,8 +440,8 @@ def render_pack(t, out):
         size = int(CTA_SIZE * 1.6)
         g = Image.new("RGBA", (s(size), s(size)), (0, 0, 0, 0))
         gd = ImageDraw.Draw(g)
-        gd.text((s(size / 2) + s(4), s(size / 2) + s(6)), ch, font=cta_font, fill=WINE + (200,), anchor="mm")
-        gd.text((s(size / 2), s(size / 2)), ch, font=cta_font, fill=MUSTARD + (255,), anchor="mm")
+        gd.text((s(size / 2) + s(4), s(size / 2) + s(6)), ch, font=cta_font, fill=THEME["cta_shadow"] + (200,), anchor="mm")
+        gd.text((s(size / 2), s(size / 2)), ch, font=cta_font, fill=THEME["cta"] + (255,), anchor="mm")
         k = max(1, int(size * sc))
         g = g.resize((k, k), Image.LANCZOS)
         _paste_clipped(out, g, int(lx + lw / 2 - k / 2), int(ly - k / 2))
@@ -448,62 +466,92 @@ def duration(path):
 
 def grab_frame(src, t):
     raw = subprocess.check_output(["ffmpeg", "-v", "error", "-ss", str(t), "-i", src, "-frames:v", "1",
-                                   "-vf", f"scale={W}:{H}", "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
-    return Image.frombytes("RGBA", (W, H), raw)
+                                   "-vf", f"scale={W}:{H}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+    return np.frombuffer(raw, np.uint8).reshape(H, W, 3)
 
 
-def main(src, dst, finale):
+# per-run state, set up before the worker pool forks
+CTX = {}
+
+
+def setup(src, finale, theme):
+    global THEME
+    THEME = THEMES[theme]
+    clean = grab_frame(src, CLEAN_PLATE_T)
+    rc = Recolor(clean, *THEME["backdrop"]) if THEME["backdrop"] else None
+    if rc:
+        clean = rc(clean)
+    CTX.update(finale=finale, recolor=rc, clean=Image.fromarray(clean).convert("RGBA"))
+
+
+def process_frame(job):
+    i, raw = job
+    t = i / FPS
+    arr = np.frombuffer(raw, np.uint8).reshape(H, W, 3)
+    if CTX["recolor"]:
+        arr = CTX["recolor"](arr)
+    frame = Image.fromarray(arr).convert("RGBA")
+    a = card_alpha(t)
+    if a > 0:  # frosted glass: blur what is behind the card
+        box = (CARD_X, CARD_Y, CARD_X + CARD_W, CARD_Y + CARD_H)
+        bl = frame.crop(box).filter(ImageFilter.GaussianBlur(BLUR))
+        bl.putalpha(GLASS_MASK.point(lambda v: int(v * a)))
+        frame.alpha_composite(bl, box[:2])
+    frame.alpha_composite(render(t, CTX["clean"], CTX["finale"]))
+    return frame.convert("RGB").tobytes()
+
+
+def main(src, dst, finale, theme):
     tail = TAIL if finale == "pack" else 0
     src_len = duration(src) - (0.1 if tail else 0)   # source ends on two dark fade frames
     total = src_len + tail
-    n = int(total * FPS) + 2
-    clean = grab_frame(src, CLEAN_PLATE_T)
-    mask_png = os.path.join(HERE, "assets", "_glass_mask.png")
-    GLASS_MASK.save(mask_png)
-    fi, di = CARD_IN
-    fo, do = CARD_OUT
-    ff = subprocess.Popen([
-        "ffmpeg", "-y", "-v", "error", "-i", src,
-        "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
-        "-loop", "1", "-i", mask_png,
-        "-filter_complex",
-        f"[0:v]trim=end={src_len:.3f},setpts=PTS-STARTPTS,scale={W}:{H},fps={FPS},tpad=stop_mode=clone:stop_duration={tail},split[bg][src];"
-        # frosted glass: blur the wall behind the card, clip to rounded rect, fade with the card
-        f"[src]crop={CARD_W}:{CARD_H}:{CARD_X}:{CARD_Y},gblur=sigma={BLUR},format=rgba[bl];"
-        f"[2:v]format=gray[m];[bl][m]alphamerge,"
-        f"fade=in:st={fi}:d={di}:alpha=1,fade=out:st={fo}:d={do}:alpha=1[glass];"
-        f"[bg][glass]overlay={CARD_X}:{CARD_Y}:shortest=1[g];"
-        f"[g][1:v]overlay=0:0:shortest=1,format=yuv420p[v];"
-        f"[0:a:0]apad[a]",
-        "-map", "[v]", "-map", "[a]", "-t", f"{total:.3f}",
-        "-c:v", "libx264", "-preset", "slow", "-crf", "19",
+    setup(src, finale, theme)
+    dec = subprocess.Popen([
+        "ffmpeg", "-v", "error", "-i", src, "-an", "-vf",
+        f"trim=end={src_len:.3f},setpts=PTS-STARTPTS,scale={W}:{H},fps={FPS},"
+        f"tpad=stop_mode=clone:stop_duration={tail}",
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], stdout=subprocess.PIPE)
+    enc = subprocess.Popen([
+        "ffmpeg", "-y", "-v", "error",
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
+        "-i", src, "-filter_complex", "[1:a:0]apad[a]", "-map", "0:v", "-map", "[a]", "-t", f"{total:.3f}",
+        "-c:v", "libx264", "-preset", "slow", "-crf", "19", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", dst,
     ], stdin=subprocess.PIPE)
-    try:
-        for i in range(n):
-            ff.stdin.write(render(i / FPS, clean, finale).tobytes())
-        ff.stdin.close()
-    except BrokenPipeError:
-        pass  # ffmpeg stopped at -t
-    rc = ff.wait()
-    os.remove(mask_png)
-    sys.exit(rc)
+
+    def frames():
+        i, size = 0, W * H * 3
+        while True:
+            raw = dec.stdout.read(size)
+            if len(raw) < size:
+                return
+            yield i, raw
+            i += 1
+
+    with Pool(os.cpu_count()) as pool:
+        for out in pool.imap(process_frame, frames(), chunksize=2):
+            enc.stdin.write(out)
+    enc.stdin.close()
+    dec.wait()
+    sys.exit(enc.wait())
 
 
 if __name__ == "__main__":
     args = sys.argv[1:]
-    finale = "chomper"
-    if "--finale" in args:
-        k = args.index("--finale")
-        finale = args[k + 1]
-        del args[k:k + 2]
+    opts = {"--finale": "chomper", "--theme": "red"}
+    for k in opts:
+        if k in args:
+            j = args.index(k)
+            opts[k] = args[j + 1]
+            del args[j:j + 2]
+    finale, theme = opts["--finale"], opts["--theme"]
     if len(args) == 2:
-        main(args[0], args[1], finale)
+        main(args[0], args[1], finale, theme)
     elif len(args) == 3 and args[0] == "--preview":
-        # --preview INPUT T : write preview_T.jpg composited on that source frame
+        # --preview INPUT T : write preview_T.jpg for that moment
         src, t = args[1], float(args[2])
-        frame = grab_frame(src, min(t, duration(src) - 0.1))
-        frame.alpha_composite(render(t, grab_frame(src, CLEAN_PLATE_T), finale))
-        frame.convert("RGB").save(f"preview_{t:05.2f}.jpg")
+        setup(src, finale, theme)
+        raw = grab_frame(src, min(t, duration(src) - 0.15)).tobytes()
+        Image.frombytes("RGB", (W, H), process_frame((round(t * FPS), raw))).save(f"preview_{t:05.2f}.jpg")
     else:
         sys.exit(__doc__)
