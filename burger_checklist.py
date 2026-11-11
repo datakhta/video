@@ -45,7 +45,7 @@ PAD = 34
 TITLE_SIZE, TEXT_SIZE = 46, 30
 BOX, GAP, LINE_H, ROW_GAP, COL_GAP = 36, 14, 40, 14, 24
 ROWS = 5
-LOGO_W, LOGO_MARGIN = 300, 44
+LOGO_W, LOGO_MARGIN = 200, 48
 
 
 def s(v):
@@ -97,15 +97,19 @@ for r in range(ROWS):
     y += max(len(wrapped[i]) for i in idx) * LINE_H + ROW_GAP
 CARD_H = y - ROW_GAP + PAD - CARD_Y
 
-# logo on a white pill so the navy "FISH&" reads on the dark background
+# logo knocked out to white (no plate), with a faint shadow to lift it off the floor
 logo = Image.open(LOGO)
 logo = logo.resize((LOGO_W, round(logo.height * LOGO_W / logo.width)), Image.LANCZOS)
-lp_x, lp_y = 26, 18
-pill = Image.new("RGBA", (LOGO_W + 2 * lp_x, logo.height + 2 * lp_y), (0, 0, 0, 0))
-ImageDraw.Draw(pill).rounded_rectangle((0, 0, pill.width - 1, pill.height - 1),
-                                       pill.height // 2, fill=WHITE + (240,))
-pill.alpha_composite(logo, (lp_x, lp_y))
-PILL_POS = (W - LOGO_MARGIN - pill.width, H - LOGO_MARGIN - 40 - pill.height)
+la = logo.getchannel("A").point(lambda v: int(v * 0.92))
+sp = 8
+pill = Image.new("RGBA", (logo.width + 2 * sp, logo.height + 2 * sp), (0, 0, 0, 0))
+shadow = Image.new("L", pill.size, 0)
+shadow.paste(la.point(lambda v: int(v * 0.5)), (sp, sp + 1))
+pill.paste(Image.new("RGBA", pill.size, (0, 0, 0, 255)), (0, 0), shadow.filter(ImageFilter.GaussianBlur(3)))
+white = Image.new("RGBA", logo.size, WHITE + (0,))
+white.putalpha(la)
+pill.alpha_composite(white, (sp, sp))
+PILL_POS = (W - LOGO_MARGIN - logo.width - sp, H - LOGO_MARGIN - 40 - logo.height - sp)
 
 # only the strips that change are rendered and piped to ffmpeg
 TOP_H = CARD_Y + CARD_H + 50
