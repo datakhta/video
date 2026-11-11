@@ -2,8 +2,9 @@
 """Animated burger checklist + chomper finale for a vertical video.
 
 Each item gets ticked the moment that ingredient lands on the burger; at the
-end a round chomper flies in and eats the burger.
-Usage: python3 burger_checklist.py INPUT.mov OUTPUT.mp4
+end either a round chomper eats the burger (--finale chomper, default) or the
+FISH&MORE pack pops in with a "Попробуйте!" call to action (--finale pack).
+Usage: python3 burger_checklist.py [--finale chomper|pack] INPUT.mov OUTPUT.mp4
 """
 import math
 import os
@@ -11,7 +12,7 @@ import random
 import subprocess
 import sys
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 W, H = 1080, 1920
@@ -58,7 +59,6 @@ CH_Y_KEYS = [(16.5, 690), (17.5, 670), (18.0, 610), (18.5, 545), (21.0, 545)]
 CH_MOUTH_HZ = 3.2
 REVEAL_Y = (320, 920)
 FEATHER = 90
-OV_H = 960                                      # overlay strip height (card + chomper)
 
 
 def s(v):
@@ -300,10 +300,142 @@ def _paste_clipped(dst, src, x, y):
         dst.alpha_composite(src.crop((sx, sy, sx + w, sy + h)), (dx, dy))
 
 
-def render(t, clean):
-    out = Image.new("RGBA", (W, OV_H), (0, 0, 0, 0))
+# --- pack finale ---------------------------------------------------------------
+
+PACK = os.path.join(HERE, "assets", "pack.png")
+PACK_T0 = 19.1            # the burger is cut out of the shot at 19.05 s
+TAIL = 3.2                # hold the empty last frame this long so the finale can play
+PACK_W, PACK_C = 600, (540, 800)
+CTA = "Попробуйте!"
+CTA_SIZE, CTA_Y = 104, 1290
+
+_pack_img = None
+cta_font = font(CTA_SIZE, b"Black")
+
+
+def pack_img():
+    global _pack_img
+    if _pack_img is None:
+        _pack_img = Image.open(PACK).convert("RGBA")
+    return _pack_img
+
+
+def ease_back(t, k=1.9):
+    t = min(max(t, 0.0), 1.0) - 1
+    return 1 + t * t * ((k + 1) * t + k)
+
+
+def elastic(t):
+    t = min(max(t, 0.0), 1.0)
+    if t in (0.0, 1.0):
+        return t
+    return 2 ** (-9 * t) * math.sin((t - 0.08) * 2 * math.pi / 0.32) + 1
+
+
+def sparkle(d, x, y, r, al, color):
+    # four-point twinkle
+    w = r * 0.22
+    d.polygon([(x, y - r), (x + w, y - w), (x + r, y), (x + w, y + w),
+               (x, y + r), (x - w, y + w), (x - r, y), (x - w, y - w)], fill=color + (al,))
+
+
+SPARKS = [(-330, -250, 0.0), (320, -330, 0.35), (350, 120, 0.7), (-345, 210, 1.05),
+          (-250, -430, 1.4), (270, 360, 0.2), (40, -470, 0.9)]
+
+
+def render_pack(t, out):
+    tt = t - PACK_T0
+    if tt < 0:
+        return
+    pk = pack_img()
+    # fly up from below with overshoot, spin settles elastically, then float + wiggle
+    rise = ease_back(tt / 0.75)
+    y_off = (1 - rise) * 1100
+    rot = -28 * (1 - elastic(tt / 1.1))
+    scale = 0.55 + 0.45 * ease_back(tt / 0.6, 2.4)
+    if tt > 0.75:
+        f = tt - 0.75
+        y_off += 16 * math.sin(2 * math.pi * 0.7 * f)
+        rot += 2.5 * math.sin(2 * math.pi * 0.5 * f)
+        scale *= 1 + 0.015 * math.sin(2 * math.pi * 1.4 * f)
+    for tw in (1.7, 3.4):  # "look at me" wiggle
+        if tw <= tt <= tw + 0.6:
+            k = (tt - tw) / 0.6
+            rot += 7 * math.sin(k * 4 * math.pi) * (1 - k)
+            scale *= 1 + 0.07 * math.sin(k * math.pi)
+
+    w = PACK_W * scale
+    img = pk.resize((int(w), int(w * pk.height / pk.width)), Image.BICUBIC)
+
+    # glossy shine sweeping across the box
+    for ts in (0.9, 2.6):
+        k = (tt - ts) / 0.55
+        if 0 <= k <= 1:
+            band = Image.new("L", (img.width * 3, img.height * 3), 0)
+            bx = band.width * (0.2 + 0.6 * k)
+            ImageDraw.Draw(band).rectangle((bx - img.width * 0.12, 0, bx + img.width * 0.12, band.height), fill=150)
+            band = band.filter(ImageFilter.GaussianBlur(img.width * 0.05)).rotate(25)
+            band = band.crop((img.width, img.height, img.width * 2, img.height * 2))
+            shine = Image.new("RGBA", img.size, WHITE + (0,))
+            shine.putalpha(ImageChops.multiply(band, img.getchannel("A")))
+            img = img.copy()
+            img.alpha_composite(shine)
+
+    img = img.rotate(rot, resample=Image.BICUBIC, expand=True)
+    cx, cy = PACK_C[0], PACK_C[1] + y_off
+
+    # soft contact shadow on the floor, smaller when the box floats higher
+    if tt > 0.2:
+        sa = min(1, (tt - 0.2) / 0.4)
+        lift = max(0.0, y_off) / 200
+        sw = w * (0.85 - 0.1 * min(lift, 1))
+        sh = Image.new("RGBA", (W, 300), (0, 0, 0, 0))
+        ImageDraw.Draw(sh).ellipse((540 - sw / 2, 120, 540 + sw / 2, 170), fill=(10, 0, 8, int(150 * sa)))
+        out.alpha_composite(sh.filter(ImageFilter.GaussianBlur(22)), (0, int(PACK_C[1] + w * 0.56 - 145)))
+
+    drop = Image.new("RGBA", img.size, (15, 0, 10, 0))
+    drop.putalpha(img.getchannel("A").point(lambda v: v * 0.5).filter(ImageFilter.GaussianBlur(16)))
+    _paste_clipped(out, drop, int(cx - img.width / 2 + 10), int(cy - img.height / 2 + 22))
+    _paste_clipped(out, img, int(cx - img.width / 2), int(cy - img.height / 2))
+
+    # twinkles around the box once it has landed
+    if tt > 0.7:
+        d = ImageDraw.Draw(out)
+        for dx, dy, ph in SPARKS:
+            k = ((tt - 0.7 + ph) % 1.4) / 1.4
+            a = math.sin(k * math.pi)
+            if a > 0.05:
+                sparkle(d, cx + dx, cy + dy, 10 + 16 * a, int(255 * a), MUSTARD if ph % 0.7 < 0.35 else WHITE)
+
+    # "Попробуйте!" letters pop in one by one, then ride a little wave
+    letters = list(CTA)
+    total = cta_font.getlength(CTA) / SS
+    x0 = W / 2 - total / 2
+    for n, ch in enumerate(letters):
+        lt = tt - 0.55 - n * 0.055
+        if lt <= 0 or ch == " ":
+            continue
+        sc = ease_back(lt / 0.35, 3.0)
+        lx = x0 + cta_font.getlength(CTA[:n]) / SS
+        lw = cta_font.getlength(ch) / SS
+        ly = CTA_Y - 14 * math.sin(2 * math.pi * 0.9 * lt - n * 0.55) * min(1, lt / 0.5)
+        size = int(CTA_SIZE * 1.6)
+        g = Image.new("RGBA", (s(size), s(size)), (0, 0, 0, 0))
+        gd = ImageDraw.Draw(g)
+        gd.text((s(size / 2) + s(4), s(size / 2) + s(6)), ch, font=cta_font, fill=WINE + (200,), anchor="mm")
+        gd.text((s(size / 2), s(size / 2)), ch, font=cta_font, fill=MUSTARD + (255,), anchor="mm")
+        k = max(1, int(size * sc))
+        g = g.resize((k, k), Image.LANCZOS)
+        _paste_clipped(out, g, int(lx + lw / 2 - k / 2), int(ly - k / 2))
+
+
+def render(t, clean, finale="chomper"):
+    out = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     render_card(t, out)
-    render_chomper(t, out, clean)
+    if finale == "chomper":
+        render_chomper(t, out, clean)
+    else:
+        render_pack(t, out)
     return out
 
 
@@ -320,8 +452,11 @@ def grab_frame(src, t):
     return Image.frombytes("RGBA", (W, H), raw)
 
 
-def main(src, dst):
-    n = int(duration(src) * FPS) + 2
+def main(src, dst, finale):
+    tail = TAIL if finale == "pack" else 0
+    src_len = duration(src) - (0.1 if tail else 0)   # source ends on two dark fade frames
+    total = src_len + tail
+    n = int(total * FPS) + 2
     clean = grab_frame(src, CLEAN_PLATE_T)
     mask_png = os.path.join(HERE, "assets", "_glass_mask.png")
     GLASS_MASK.save(mask_png)
@@ -329,35 +464,46 @@ def main(src, dst):
     fo, do = CARD_OUT
     ff = subprocess.Popen([
         "ffmpeg", "-y", "-v", "error", "-i", src,
-        "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{W}x{OV_H}", "-r", str(FPS), "-i", "-",
+        "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
         "-loop", "1", "-i", mask_png,
         "-filter_complex",
-        f"[0:v]scale={W}:{H},fps={FPS},split[bg][src];"
+        f"[0:v]trim=end={src_len:.3f},setpts=PTS-STARTPTS,scale={W}:{H},fps={FPS},tpad=stop_mode=clone:stop_duration={tail},split[bg][src];"
         # frosted glass: blur the wall behind the card, clip to rounded rect, fade with the card
         f"[src]crop={CARD_W}:{CARD_H}:{CARD_X}:{CARD_Y},gblur=sigma={BLUR},format=rgba[bl];"
         f"[2:v]format=gray[m];[bl][m]alphamerge,"
         f"fade=in:st={fi}:d={di}:alpha=1,fade=out:st={fo}:d={do}:alpha=1[glass];"
         f"[bg][glass]overlay={CARD_X}:{CARD_Y}:shortest=1[g];"
-        f"[g][1:v]overlay=0:0:shortest=1,format=yuv420p[v]",
-        "-map", "[v]", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "slow", "-crf", "19",
+        f"[g][1:v]overlay=0:0:shortest=1,format=yuv420p[v];"
+        f"[0:a:0]apad[a]",
+        "-map", "[v]", "-map", "[a]", "-t", f"{total:.3f}",
+        "-c:v", "libx264", "-preset", "slow", "-crf", "19",
         "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", dst,
     ], stdin=subprocess.PIPE)
-    for i in range(n):
-        ff.stdin.write(render(i / FPS, clean).tobytes())
-    ff.stdin.close()
+    try:
+        for i in range(n):
+            ff.stdin.write(render(i / FPS, clean, finale).tobytes())
+        ff.stdin.close()
+    except BrokenPipeError:
+        pass  # ffmpeg stopped at -t
     rc = ff.wait()
     os.remove(mask_png)
     sys.exit(rc)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3:
-        main(sys.argv[1], sys.argv[2])
-    elif len(sys.argv) == 4 and sys.argv[1] == "--preview":
-        # --preview INPUT T : write preview_T.png composited on that source frame
-        src, t = sys.argv[2], float(sys.argv[3])
-        frame = grab_frame(src, t)
-        frame.alpha_composite(render(t, grab_frame(src, CLEAN_PLATE_T)))
+    args = sys.argv[1:]
+    finale = "chomper"
+    if "--finale" in args:
+        k = args.index("--finale")
+        finale = args[k + 1]
+        del args[k:k + 2]
+    if len(args) == 2:
+        main(args[0], args[1], finale)
+    elif len(args) == 3 and args[0] == "--preview":
+        # --preview INPUT T : write preview_T.jpg composited on that source frame
+        src, t = args[1], float(args[2])
+        frame = grab_frame(src, min(t, duration(src) - 0.1))
+        frame.alpha_composite(render(t, grab_frame(src, CLEAN_PLATE_T), finale))
         frame.convert("RGB").save(f"preview_{t:05.2f}.jpg")
     else:
         sys.exit(__doc__)
